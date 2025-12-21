@@ -22,24 +22,24 @@ app.use(cors({
   origin: true,
   credentials: true
 }));
-
-app.use(express.json());
+connectDB();
 app.use(cookieParser());
+
 
 // --------------------
 // Connect to MongoDB
 // --------------------
-connectDB();
+app.use("/api/orders", orderRoutes); // ✅ Use order routes
 
 // --------------------
 // Routes
 // --------------------
+app.use(express.json());
 app.use("/api/otp", otpRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/cart", cartRoutes);
 app.use("/api/coupons", couponRoutes);
-app.use("/api/orders", orderRoutes); // ✅ Use order routes
 
 // Base route
 app.get("/", (req, res) => {

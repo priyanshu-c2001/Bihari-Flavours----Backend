@@ -1,19 +1,38 @@
 const mongoose = require('mongoose');
-const { orderItemSchema } = require('./order.model'); // reuse orderItemSchema
+const { orderItemSchema } = require('./order.model');
 
 const orderHistorySchema = new mongoose.Schema({
-  originalOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', required: true },
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  originalOrderId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Order',
+    required: true
+  },
+
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  },
 
   // Items copied from order
-  items: { type: [orderItemSchema], required: true, default: [] },
+  items: {
+    type: [orderItemSchema],
+    required: true,
+    validate: {
+      validator: arr => Array.isArray(arr) && arr.length > 0,
+      message: 'Order history must contain at least one item'
+    }
+  },
 
-  totalAmount: { type: Number, default: 0 },
+  totalAmount: {
+    type: Number,
+    required: true
+  },
 
-  // Shipping address (with name and phone)
+  // Shipping address snapshot
   shippingAddress: {
-    name: { type: String, required: true },      // recipient name
-    phone: { type: String, required: true },     // recipient phone
+    name: { type: String, required: true },
+    phone: { type: String, required: true },
     street: { type: String },
     city: { type: String },
     state: { type: String },
@@ -21,17 +40,45 @@ const orderHistorySchema = new mongoose.Schema({
     country: { type: String, default: 'India' }
   },
 
-  orderStatus: { type: String, default: 'Pending' },
-  paymentStatus: { type: String, default: 'Pending' },
-  paymentMethod: { type: String, default: '' },
+  orderStatus: {
+    type: String,
+    required: true
+  },
+
+  paymentStatus: {
+    type: String,
+    required: true
+  },
+
+  paymentMethod: {
+    type: String,
+    required: true
+  },
 
   // Transaction link
-  transactionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Transaction', default: null },
+  transactionId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'TransactionModel',
+    default: null
+  },
 
-  completedAt: { type: Date, default: Date.now }
+  // TTL anchor field
+  completedAt: {
+    type: Date,
+    default: Date.now
+  }
+
 }, { timestamps: true });
 
-// TTL index to auto-delete order history after 2 weeks (14 days)
-orderHistorySchema.index({ completedAt: 1 }, { expireAfterSeconds: 14 * 24 * 60 * 60 });
+/**
+ * ✅ TTL INDEX
+ * Auto-delete history after 14 days
+ */
+orderHistorySchema.index(
+  { completedAt: 1 },
+  { expireAfterSeconds: 14 * 24 * 60 * 60 }
+);
 
-module.exports = mongoose.models.OrderHistory || mongoose.model('OrderHistory', orderHistorySchema);
+module.exports =
+  mongoose.models.OrderHistory ||
+  mongoose.model('OrderHistory', orderHistorySchema);

@@ -1,4 +1,4 @@
-// controllers/admin.controller.js
+const mongoose = require('mongoose');
 const Order = require('../models/order.model');
 const OrderHistory = require('../models/orderhistory.model');
 const Coupon = require('../models/coupon.model');
@@ -8,21 +8,21 @@ const Coupon = require('../models/coupon.model');
 // ----------------------------
 const cleanOrder = async (order) => {
   const obj = order.toObject();
+
   delete obj.transactionId;
 
-  // Include coupon details if present
   if (obj.couponId) {
-    const coupon = await Coupon.findById(obj.couponId);
+    const coupon = await Coupon.findById(obj.couponId).lean();
     if (coupon) {
       obj.coupon = {
-        name: coupon.code,
+        code: coupon.code,
         discountPercentage: coupon.discountPercentage,
       };
     }
   }
+
   delete obj.couponId;
 
-  // Include name and phone from shippingAddress
   obj.customerName = obj.shippingAddress?.name || '';
   obj.customerPhone = obj.shippingAddress?.phone || '';
 
@@ -30,58 +30,68 @@ const cleanOrder = async (order) => {
 };
 
 // ----------------------------
-// Get all pending orders (COD or Paid online)
+// Get active (pending/processing/shipped) orders
 // ----------------------------
 exports.getPendingOrders = async (req, res) => {
   try {
-    const orders = await Order.find({}).sort({ createdAt: -1 });
+    const orders = await Order.find({
+      orderStatus: { $nin: ['Delivered', 'Cancelled'] }
+    }).sort({ createdAt: -1 });
 
     const cleanedOrders = await Promise.all(orders.map(cleanOrder));
 
     res.status(200).json({ success: true, orders: cleanedOrders });
   } catch (error) {
-    console.error('❌ getPendingOrders:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch pending orders',
-      error: error.message,
     });
   }
 };
 
 // ----------------------------
-// Update order status
+// Update order status (SAFE)
 // ----------------------------
 exports.updateOrderStatus = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     const { id } = req.params;
     const { orderStatus } = req.body;
 
-    const order = await Order.findById(id);
-    if (!order)
+    const order = await Order.findById(id).session(session);
+    if (!order) {
+      await session.abortTransaction();
       return res.status(404).json({ success: false, message: 'Order not found' });
+    }
 
-    // Update status
     order.orderStatus = orderStatus;
 
-    // Auto-complete COD payments when delivered
     if (order.paymentMethod === 'COD' && orderStatus === 'Delivered') {
       order.paymentStatus = 'Paid';
     }
 
-    // Check if we need to move to history
     if (orderStatus === 'Delivered' || orderStatus === 'Cancelled') {
-      const { _id, ...orderData } = order.toObject();
-      
-      // Save to OrderHistory
-      await OrderHistory.create({
-        ...orderData,
-        originalOrderId: _id,
-        completedAt: new Date(),
-      });
+      const exists = await OrderHistory.findOne(
+        { originalOrderId: order._id }
+      ).session(session);
 
-      // Remove from active orders
-      await Order.findByIdAndDelete(_id);
+      if (!exists) {
+        const orderData = order.toObject();
+        delete orderData._id;
+
+        await OrderHistory.create([{
+          ...orderData,
+          originalOrderId: order._id,
+          completedAt: new Date(),
+        }], { session });
+      }
+
+      await Order.deleteOne({ _id: order._id }).session(session);
+
+      await session.commitTransaction();
+      session.endSession();
 
       return res.status(200).json({
         success: true,
@@ -89,8 +99,9 @@ exports.updateOrderStatus = async (req, res) => {
       });
     }
 
-    // Otherwise, just save updated status
-    await order.save();
+    await order.save({ session });
+    await session.commitTransaction();
+    session.endSession();
 
     const cleanedOrder = await cleanOrder(order);
     res.status(200).json({
@@ -98,72 +109,51 @@ exports.updateOrderStatus = async (req, res) => {
       message: 'Order status updated successfully',
       order: cleanedOrder,
     });
+
   } catch (error) {
-    console.error('❌ updateOrderStatus:', error);
+    await session.abortTransaction();
+    session.endSession();
+
     res.status(500).json({
       success: false,
       message: 'Failed to update order',
-      error: error.message,
     });
   }
 };
-
 
 // ----------------------------
 // Get all order history
 // ----------------------------
-// controllers/orderHistory.controller.js
-
-
-// Clean & populate order history
-const cleanOrderhistory = async (order) => {
-  const orderObj = order.toObject();
-
-  // Add coupon info if exists
-  if (orderObj.couponId) {
-    const coupon = await Coupon.findById(orderObj.couponId);
-    orderObj.coupon = coupon ? { code: coupon.code, discount: coupon.discount } : null;
-  }
-
-  return orderObj;
-};
-
-// GET /orders/admin/history
 exports.getOrderHistory = async (req, res) => {
   try {
-    const history = await OrderHistory.find().sort({ completedAt: -1 });
-    const cleanedHistory = await Promise.all(history.map(cleanOrderhistory));
+    const history = await OrderHistory.find()
+      .sort({ completedAt: -1 })
+      .lean();
 
-    res.status(200).json({ success: true, orders: cleanedHistory });
+    res.status(200).json({ success: true, orders: history });
   } catch (error) {
-    console.error('❌ getOrderHistory:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch order history',
-      error: error.message,
     });
   }
 };
 
 // ----------------------------
-// Get specific order by ID (admin)
+// Get order by ID (admin)
 // ----------------------------
 exports.getOrderById = async (req, res) => {
   try {
-    const { id } = req.params;
-    const order = await Order.findById(id);
-
+    const order = await Order.findById(req.params.id);
     if (!order)
       return res.status(404).json({ success: false, message: 'Order not found' });
 
     const cleanedOrder = await cleanOrder(order);
     res.status(200).json({ success: true, order: cleanedOrder });
   } catch (error) {
-    console.error('❌ getOrderById:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch order',
-      error: error.message,
     });
   }
 };

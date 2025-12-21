@@ -7,7 +7,6 @@ const {
   razorpayWebhook,
   getUserOrders,
   getOrderDetails,
-  verifyPayment,
   verifyCoupon,
 } = require('../controllers/order.controller');
 
@@ -28,39 +27,38 @@ const { adminProtect } = require('../middleware/admin.middleware');
 // Verify coupon before creating order
 router.post('/verify-coupon', protect, verifyCoupon);
 
-// Create a new order (protected)
+// Create a new order
 router.post('/create', protect, createOrder);
 
-// Get all orders of the logged-in user
+// Get all orders of logged-in user
 router.get('/my-orders', protect, getUserOrders);
 
-// Get details of a specific order for the logged-in user
+// Get single order details (user)
 router.get('/my-orders/:id', protect, getOrderDetails);
 
-// Razorpay webhook (called by Razorpay; public route)
+// --------------------
+// RAZORPAY WEBHOOK (RAW BODY ONLY)
+// --------------------
 router.post(
   '/razorpay-webhook',
   express.raw({ type: 'application/json' }),
   razorpayWebhook
 );
 
-// Verify payment manually (frontend call after payment)
-router.post('/verify-payment', protect, verifyPayment);
-
 // --------------------
 // ADMIN ROUTES
 // --------------------
 
-// Get all pending or paid orders
+// Get all pending / paid orders
 router.get('/admin/orders', protect, adminProtect, getPendingOrders);
 
 // Update order status
 router.patch('/admin/orders/:id', protect, adminProtect, updateOrderStatus);
 
-// Get specific order by ID (admin view)
+// Get order details (admin)
 router.get('/admin/orders/details/:id', protect, adminProtect, getOrderById);
 
-// Get all order history
+// Order history
 router.get('/admin/history', protect, adminProtect, getOrderHistory);
 
 module.exports = router;
