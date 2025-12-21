@@ -36,14 +36,6 @@ router.get('/my-orders', protect, getUserOrders);
 // Get single order details (user)
 router.get('/my-orders/:id', protect, getOrderDetails);
 
-// --------------------
-// RAZORPAY WEBHOOK (RAW BODY ONLY)
-// --------------------
-router.post(
-  '/razorpay-webhook',
-  express.raw({ type: 'application/json' }),
-  razorpayWebhook
-);
 
 // --------------------
 // ADMIN ROUTES

@@ -4,7 +4,6 @@ const connectDB = require("./config/db");
 require("dotenv").config();
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
-
 // Routes
 const otpRoutes = require("./routes/otp.routes");
 const userRoutes = require("./routes/user.routes");
@@ -12,8 +11,10 @@ const productRoutes = require("./routes/product.routes");
 const cartRoutes = require("./routes/cart.routes");
 const couponRoutes = require("./routes/coupon.routes");
 const orderRoutes = require("./routes/order.routes"); 
+const {razorpayWebhook} = require("./controllers/order.controller");
 
 const app = express();
+
 
 // --------------------
 // Middlewares
@@ -23,10 +24,18 @@ app.use(cors({
   credentials: true
 }));
 connectDB();
-app.use(express.json());
 app.use(cookieParser());
 
+// --------------------
+// RAZORPAY WEBHOOK (RAW BODY ONLY)
+// --------------------
+router.post(
+  '/razorpay-webhook',
+  express.raw({ type: 'application/json' }),
+  razorpayWebhook
+);
 
+app.use(express.json());
 // --------------------
 // Connect to MongoDB
 // --------------------
