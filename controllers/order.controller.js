@@ -132,6 +132,7 @@ exports.createOrder = async (req, res) => {
    RAZORPAY WEBHOOK (TRANSACTION SAFE)
 ---------------------------- */
 exports.razorpayWebhook = async (req, res) => {
+  console.log('🔔 Razorpay Webhook received');
   const session = await mongoose.startSession();
   session.startTransaction();
 
