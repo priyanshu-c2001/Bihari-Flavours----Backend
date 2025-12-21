@@ -1,7 +1,5 @@
-// middleware/admin.middleware.js
 const { protect } = require("./auth.middleware");
 
-// Admin protect middleware
 const adminProtect = [
   protect,
   (req, res, next) => {

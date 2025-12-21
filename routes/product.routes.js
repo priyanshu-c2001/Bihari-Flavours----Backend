@@ -12,8 +12,6 @@ const {
 } = require("../controllers/product.controller");
 
 // ✅ All routes require valid token
-router.use(protect);
-
 // ✅ Authenticated users (normal or admin) can view
 router.get("/", getProducts);
 router.get("/:id", getProductById);

@@ -2,7 +2,18 @@ const { sendOtp, verifyOtp, formatPhoneNumber } = require("../utils/twilio");
 const Otp = require("../models/otp.model");
 const User = require("../models/user.model");
 const { generateToken } = require("../utils/jwt");
+
 const isProduction = process.env.USE_HTTPS === "true";
+
+const cookieOptions = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? "None" : "Lax",
+  maxAge: 7 * 24 * 60 * 60 * 1000,
+  path: "/",
+};
+
+const VALID_PURPOSES = ["signup", "login", "forgot"];
 
 // =====================
 // SEND OTP
@@ -10,34 +21,52 @@ const isProduction = process.env.USE_HTTPS === "true";
 exports.sendOtpController = async (req, res) => {
   try {
     let { phone, purpose } = req.body;
-    if (!phone || !purpose) {
-      return res.status(400).json({ success: false, message: "Phone and purpose are required" });
+
+    if (!phone || !purpose || !VALID_PURPOSES.includes(purpose)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid phone or purpose",
+      });
     }
 
     phone = formatPhoneNumber(phone);
+
     const existingUser = await User.findOne({ phone });
 
     if (purpose === "signup" && existingUser) {
-      return res.status(400).json({ success: false, message: "User already exists!" });
-    }
-    if ((purpose === "login" || purpose === "forgot") && !existingUser) {
-      return res.status(404).json({ success: false, message: "User not found!" });
+      return res.status(400).json({
+        success: false,
+        message: "User already exists",
+      });
     }
 
-    // Send OTP via Twilio
+    if ((purpose === "login" || purpose === "forgot") && !existingUser) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
     await sendOtp(phone);
 
-    // Save / Update OTP in DB
     await Otp.findOneAndUpdate(
       { phone },
       { phone, verified: false, status: "pending", createdAt: new Date() },
       { upsert: true, new: true }
     );
 
-    res.status(200).json({ success: true, message: "OTP sent successfully!", purpose });
+    res.status(200).json({
+      success: true,
+      message: "OTP sent successfully",
+      purpose,
+    });
+
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ success: false, message: "Failed to send OTP", error: error.message });
+    console.error("Send OTP error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "Failed to send OTP",
+    });
   }
 };
 
@@ -47,58 +76,68 @@ exports.sendOtpController = async (req, res) => {
 exports.resendOtpController = async (req, res) => {
   try {
     let { phone } = req.body;
+
     if (!phone) {
-      return res.status(400).json({ success: false, message: "Phone number is required" });
+      return res.status(400).json({
+        success: false,
+        message: "Phone number is required",
+      });
     }
 
     phone = formatPhoneNumber(phone);
 
-    // Resend OTP via Twilio
     await sendOtp(phone);
 
-    // Update OTP entry in DB
     await Otp.findOneAndUpdate(
       { phone },
       { verified: false, status: "pending", createdAt: new Date() },
       { upsert: true, new: true }
     );
 
-    res.status(200).json({ success: true, message: "OTP resent successfully!" });
+    res.status(200).json({
+      success: true,
+      message: "OTP resent successfully",
+    });
+
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ success: false, message: "Failed to resend OTP", error: error.message });
+    console.error("Resend OTP error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "Failed to resend OTP",
+    });
   }
 };
-
 
 // =====================
 // VERIFY OTP
 // =====================
-
 exports.verifyOtpController = async (req, res) => {
   try {
     let { phone, code, purpose } = req.body;
 
-    // Validate input
-    if (!phone || !code || !purpose) {
+    if (!phone || !code || !VALID_PURPOSES.includes(purpose)) {
       return res.status(400).json({
         success: false,
-        message: "Phone, code, and purpose are required"
+        message: "Invalid request",
       });
     }
 
     phone = formatPhoneNumber(phone);
 
-    // Verify OTP via Twilio
     const verification = await verifyOtp(phone, code);
     if (!verification || verification.status !== "approved") {
-      return res.status(400).json({ success: false, message: "Invalid OTP" });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid OTP",
+      });
     }
 
-    // Mark OTP as verified in DB
     const otpEntry = await Otp.findOne({ phone });
     if (!otpEntry) {
-      return res.status(404).json({ success: false, message: "OTP not found" });
+      return res.status(404).json({
+        success: false,
+        message: "OTP not found",
+      });
     }
 
     otpEntry.verified = true;
@@ -106,33 +145,33 @@ exports.verifyOtpController = async (req, res) => {
     otpEntry.createdAt = new Date();
     await otpEntry.save();
 
-    // Handle login or forgot password
+    // Login / Forgot flow
     if (purpose === "login" || purpose === "forgot") {
       const user = await User.findOne({ phone }).select("-password");
+
       if (!user) {
-        return res.status(404).json({ success: false, message: "User not found" });
+        return res.status(404).json({
+          success: false,
+          message: "User not found",
+        });
       }
 
       const token = generateToken(user);
 
-      // Send token in HTTP-only cookie only in production
-      if (isProduction) {
-        res.cookie("token", token, {
-          httpOnly: true,
-          secure: true,
-          sameSite: "strict",
-          maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-        });
-      }
+      // Always set cookie (safe for dev & prod)
+      res.cookie("token", token, cookieOptions);
 
-      // Prepare response
       const responseData = {
         success: true,
-        message: "OTP verified successfully!",
-        user: { name: user.name, phone: user.phone, role: user.role }
+        message: "OTP verified successfully",
+        user: {
+          name: user.name,
+          phone: user.phone,
+          role: user.role,
+        },
       };
 
-      // Include token in response only in development
+      // Token only exposed in dev / HTTP mode
       if (!isProduction) {
         responseData.token = token;
       }
@@ -140,14 +179,17 @@ exports.verifyOtpController = async (req, res) => {
       return res.status(200).json(responseData);
     }
 
-    // For signup or other purposes, just return success
-    return res.status(200).json({ success: true, message: "OTP verified successfully!" });
+    // Signup flow → only verification
+    return res.status(200).json({
+      success: true,
+      message: "OTP verified successfully",
+    });
+
   } catch (error) {
-    console.error("OTP verification error:", error);
-    return res.status(500).json({
+    console.error("Verify OTP error:", error.message);
+    res.status(500).json({
       success: false,
       message: "OTP verification failed",
-      error: error.message
     });
   }
 };
