@@ -29,7 +29,7 @@ app.use(cookieParser());
 // --------------------
 // RAZORPAY WEBHOOK (RAW BODY ONLY)
 // --------------------
-router.post(
+app.post(
   '/razorpay-webhook',
   express.raw({ type: 'application/json' }),
   razorpayWebhook
