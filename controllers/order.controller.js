@@ -132,7 +132,7 @@ exports.createOrder = async (req, res) => {
    RAZORPAY WEBHOOK (TRANSACTION SAFE)
 ---------------------------- */
 exports.razorpayWebhook = async (req, res) => {
-  console.log('🔔 Razorpay Webhook received');
+  console.log('🔔 Razorpay Webhook received', req.body);
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -153,6 +153,7 @@ exports.razorpayWebhook = async (req, res) => {
     if (event.event !== 'payment.captured') {
       return res.status(200).json({ success: true, message: 'Event ignored' });
     }
+    console.log('Processing payment.captured event');
 
     const payment = event.payload.payment.entity;
     const order = await Order.findOne({ razorpayOrderId: payment.order_id }).session(session);
@@ -163,6 +164,7 @@ exports.razorpayWebhook = async (req, res) => {
       session.endSession();
       return res.status(200).json({ success: true, message: 'Already processed' });
     }
+    console.log(`Updating order ${order._id} as Paid`);
 
     order.paymentStatus = 'Paid';
     await order.save({ session });
@@ -185,7 +187,7 @@ exports.razorpayWebhook = async (req, res) => {
       order.transactionId = txn[0]._id;
       await order.save({ session });
     }
-
+      console.log(`Clearing cart for user ${order.userId}`);
     await Cart.findOneAndUpdate(
       { userId: order.userId },
       { $set: { cartItems: [], totalAmount: 0 } },
