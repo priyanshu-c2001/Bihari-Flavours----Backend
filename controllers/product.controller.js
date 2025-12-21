@@ -62,6 +62,7 @@ exports.addProduct = async (req, res) => {
 exports.getProducts = async (req, res) => {
   try {
     const products = await Product.find().sort({ createdAt: -1 });
+    console.log(req.Headers)
     res.status(200).json({ success: true, count: products.length, products });
   } catch (error) {
     console.error("Get products error:", error);
