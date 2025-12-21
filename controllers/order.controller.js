@@ -132,79 +132,154 @@ exports.createOrder = async (req, res) => {
    RAZORPAY WEBHOOK (TRANSACTION SAFE)
 ---------------------------- */
 exports.razorpayWebhook = async (req, res) => {
-  console.log('🔔 Razorpay Webhook received', req.body);
+  console.log('🔔 Razorpay Webhook received');
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
     const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
     const signature = req.headers['x-razorpay-signature'];
-
+   console.log('Webhook Signature:', signature);
     const expectedSignature = crypto
       .createHmac('sha256', webhookSecret)
       .update(req.body)
       .digest('hex');
-
+console.log('Expected Signature:', expectedSignature);
     if (expectedSignature !== signature) {
-      return res.status(400).json({ success: false, message: 'Invalid webhook signature' });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid webhook signature'
+      });
     }
+    console.log('Webhook signature verified');
 
     const event = JSON.parse(req.body.toString());
-    if (event.event !== 'payment.captured') {
-      return res.status(200).json({ success: true, message: 'Event ignored' });
-    }
-    console.log('Processing payment.captured event');
+    const eventType = event.event;
 
-    const payment = event.payload.payment.entity;
-    const order = await Order.findOne({ razorpayOrderId: payment.order_id }).session(session);
+    /* ----------------------------
+       PAYMENT SUCCESS
+    ---------------------------- */
+    if (eventType === 'payment.captured') {
+      console.log('Processing payment.captured');
 
-    if (!order) throw new Error('Order not found');
-    if (order.paymentStatus === 'Paid') {
+      const payment = event.payload.payment.entity;
+      const order = await Order.findOne({
+        razorpayOrderId: payment.order_id
+      }).session(session);
+
+      if (!order) throw new Error('Order not found');
+
+      if (order.paymentStatus === 'Paid') {
+        await session.commitTransaction();
+        session.endSession();
+        return res.status(200).json({ success: true, message: 'Already processed' });
+      }
+
+      order.paymentStatus = 'Paid';
+      await order.save({ session });
+
+      const exists = await TransactionModel.findOne({
+        transactionId: payment.id
+      }).session(session);
+
+      if (!exists) {
+        const txn = await TransactionModel.create([{
+          orderId: order._id,
+          userId: order.userId,
+          items: order.items,
+          amount: order.totalAmount,
+          paymentMethod: order.paymentMethod,
+          paymentStatus: 'Success',
+          transactionId: payment.id
+        }], { session });
+
+        order.transactionId = txn[0]._id;
+        await order.save({ session });
+      }
+
+      // Clear cart AFTER payment success
+      await Cart.findOneAndUpdate(
+        { userId: order.userId },
+        { $set: { cartItems: [], totalAmount: 0 } },
+        { session }
+      );
+
       await session.commitTransaction();
       session.endSession();
-      return res.status(200).json({ success: true, message: 'Already processed' });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Payment processed successfully'
+      });
     }
-    console.log(`Updating order ${order._id} as Paid`);
 
-    order.paymentStatus = 'Paid';
-    await order.save({ session });
+    /* ----------------------------
+       PAYMENT FAILED
+    ---------------------------- */
+    if (eventType === 'payment.failed') {
+      console.log('Processing payment.failed');
 
-    const exists = await TransactionModel.findOne({
-      transactionId: payment.id
-    }).session(session);
+      const payment = event.payload.payment.entity;
+      const order = await Order.findOne({
+        razorpayOrderId: payment.order_id
+      }).session(session);
 
-    if (!exists) {
-      const txn = await TransactionModel.create([{
-        orderId: order._id,
-        userId: order.userId,
-        items: order.items,
-        amount: order.totalAmount,
-        paymentMethod: order.paymentMethod,
-        paymentStatus: 'Success',
-        transactionId: payment.id
-      }], { session });
+      if (!order) {
+        await session.commitTransaction();
+        session.endSession();
+        return res.status(200).json({ success: true, message: 'Order already removed' });
+      }
 
-      order.transactionId = txn[0]._id;
-      await order.save({ session });
+      // Safety: do NOT delete paid orders
+      if (order.paymentStatus === 'Paid') {
+        await session.commitTransaction();
+        session.endSession();
+        return res.status(200).json({ success: true, message: 'Order already paid' });
+      }
+
+      // OPTIONAL: restore coupon usage
+      if (order.couponId) {
+        await Coupon.findByIdAndUpdate(
+          order.couponId,
+          { $inc: { usageLimit: 1 } },
+          { session }
+        );
+      }
+
+      await Order.deleteOne({ _id: order._id }).session(session);
+
+      await session.commitTransaction();
+      session.endSession();
+
+      return res.status(200).json({
+        success: true,
+        message: 'Order deleted due to payment failure'
+      });
     }
-      console.log(`Clearing cart for user ${order.userId}`);
-    await Cart.findOneAndUpdate(
-      { userId: order.userId },
-      { $set: { cartItems: [], totalAmount: 0 } },
-      { session }
-    );
 
+    /* ----------------------------
+       OTHER EVENTS
+    ---------------------------- */
     await session.commitTransaction();
     session.endSession();
-
-    res.status(200).json({ success: true, message: 'Payment processed successfully' });
+    return res.status(200).json({
+      success: true,
+      message: 'Event ignored'
+    });
 
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
-    res.status(500).json({ success: false, message: 'Webhook processing failed' });
+
+    console.error('Webhook error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Webhook processing failed'
+    });
   }
 };
+
 
 /* ----------------------------
    GET USER ORDERS (FIXED SHAPE)
