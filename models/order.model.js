@@ -59,7 +59,7 @@ const orderSchema = new mongoose.Schema({
     },
     street: {
       type: String,
-      required: true
+    
     },
     city: {
       type: String,
@@ -71,7 +71,7 @@ const orderSchema = new mongoose.Schema({
     },
     postalCode: {
       type: String,
-      required: true
+      
     },
     country: {
       type: String,

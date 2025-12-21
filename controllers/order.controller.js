@@ -8,9 +8,9 @@ const Coupon = require('../models/coupon.model');
 const Cart = require('../models/cart.model');
 const razorpay = require('../config/razorpay');
 
-// ----------------------------
-// VERIFY COUPON
-// ----------------------------
+/* ----------------------------
+   VERIFY COUPON
+---------------------------- */
 exports.verifyCoupon = async (req, res) => {
   try {
     const { couponCode, totalAmount } = req.body;
@@ -40,14 +40,14 @@ exports.verifyCoupon = async (req, res) => {
         maxPurchase: coupon.maxPurchase
       }
     });
-  } catch (err) {
+  } catch {
     res.status(500).json({ success: false, message: 'Coupon verification failed' });
   }
 };
 
-// ----------------------------
-// CREATE ORDER (WITH TRANSACTION)
-// ----------------------------
+/* ----------------------------
+   CREATE ORDER (TRANSACTION SAFE)
+---------------------------- */
 exports.createOrder = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -56,20 +56,11 @@ exports.createOrder = async (req, res) => {
     const { items, shippingAddress, paymentMethod, couponCode } = req.body;
     const userId = req.user._id;
 
-    if (!items || items.length === 0) {
-      throw new Error('Cart is empty');
-    }
+    if (!items || !items.length) throw new Error('Cart is empty');
 
-    for (const i of items) {
-      if (i.stockStatus === 'outofstock') {
-        throw new Error(`${i.name} is out of stock`);
-      }
-    }
-
-    let totalAmount = items.reduce((sum, i) => sum + i.price * i.quantity, 0);
+    let totalAmount = items.reduce((s, i) => s + i.price * i.quantity, 0);
     let coupon = null;
 
-    // Atomic coupon usage
     if (couponCode) {
       coupon = await Coupon.findOneAndUpdate(
         {
@@ -83,10 +74,7 @@ exports.createOrder = async (req, res) => {
         { new: true, session }
       );
 
-      if (!coupon) {
-        throw new Error('Coupon not applicable');
-      }
-
+      if (!coupon) throw new Error('Coupon not applicable');
       totalAmount -= (totalAmount * coupon.discountPercentage) / 100;
     }
 
@@ -100,11 +88,11 @@ exports.createOrder = async (req, res) => {
       paymentStatus: 'Pending'
     }], { session });
 
-    // COD → clear cart immediately
+    /* COD FLOW */
     if (paymentMethod === 'COD') {
       await Cart.findOneAndUpdate(
         { userId },
-        { $set: { items: [] } },
+        { $set: { cartItems: [], totalAmount: 0 } },
         { session }
       );
 
@@ -118,7 +106,7 @@ exports.createOrder = async (req, res) => {
       });
     }
 
-    // Online payment → create Razorpay order
+    /* ONLINE PAYMENT */
     const razorpayOrder = await razorpay.orders.create({
       amount: Math.round(totalAmount * 100),
       currency: 'INR',
@@ -131,24 +119,22 @@ exports.createOrder = async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
-    res.status(200).json({
-      success: true,
-      order,
-      razorpayOrder
-    });
+    res.status(200).json({ success: true, order, razorpayOrder });
 
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
-
     res.status(400).json({ success: false, message: error.message });
   }
 };
 
-// ----------------------------
-// RAZORPAY WEBHOOK (RAW BODY)
-// ----------------------------
+/* ----------------------------
+   RAZORPAY WEBHOOK (TRANSACTION SAFE)
+---------------------------- */
 exports.razorpayWebhook = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
     const signature = req.headers['x-razorpay-signature'];
@@ -163,64 +149,63 @@ exports.razorpayWebhook = async (req, res) => {
     }
 
     const event = JSON.parse(req.body.toString());
-
     if (event.event !== 'payment.captured') {
       return res.status(200).json({ success: true, message: 'Event ignored' });
     }
 
     const payment = event.payload.payment.entity;
-    const razorpayOrderId = payment.order_id;
-    const razorpayPaymentId = payment.id;
+    const order = await Order.findOne({ razorpayOrderId: payment.order_id }).session(session);
 
-    const order = await Order.findOne({ razorpayOrderId });
-    if (!order) {
-      return res.status(404).json({ success: false, message: 'Order not found' });
-    }
-
-    // Idempotency
+    if (!order) throw new Error('Order not found');
     if (order.paymentStatus === 'Paid') {
+      await session.commitTransaction();
+      session.endSession();
       return res.status(200).json({ success: true, message: 'Already processed' });
     }
 
     order.paymentStatus = 'Paid';
-    await order.save();
+    await order.save({ session });
 
-    const existingTxn = await TransactionModel.findOne({
-      transactionId: razorpayPaymentId
-    });
+    const exists = await TransactionModel.findOne({
+      transactionId: payment.id
+    }).session(session);
 
-    if (!existingTxn) {
-      const transaction = await TransactionModel.create({
+    if (!exists) {
+      const txn = await TransactionModel.create([{
         orderId: order._id,
         userId: order.userId,
         items: order.items,
         amount: order.totalAmount,
         paymentMethod: order.paymentMethod,
         paymentStatus: 'Success',
-        transactionId: razorpayPaymentId
-      });
+        transactionId: payment.id
+      }], { session });
 
-      order.transactionId = transaction._id;
-      await order.save();
+      order.transactionId = txn[0]._id;
+      await order.save({ session });
     }
 
-    // Clear cart after payment success
     await Cart.findOneAndUpdate(
       { userId: order.userId },
-      { $set: { items: [] } }
+      { $set: { cartItems: [], totalAmount: 0 } },
+      { session }
     );
+
+    await session.commitTransaction();
+    session.endSession();
 
     res.status(200).json({ success: true, message: 'Payment processed successfully' });
 
   } catch (error) {
-    console.error('Webhook error:', error);
+    await session.abortTransaction();
+    session.endSession();
     res.status(500).json({ success: false, message: 'Webhook processing failed' });
   }
 };
 
-// ----------------------------
-// GET USER ORDERS (FIXED)
-// ----------------------------
+/* ----------------------------
+   GET USER ORDERS (FIXED SHAPE)
+---------------------------- */
 exports.getUserOrders = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -228,35 +213,35 @@ exports.getUserOrders = async (req, res) => {
     const activeOrders = await Order.find({ userId }).lean();
     const completedOrders = await OrderHistory.find({ userId }).lean();
 
-    const completedMap = new Set(
-      completedOrders.map(h => h.originalOrderId.toString())
+    const completedSet = new Set(
+      completedOrders.map(o => o.originalOrderId.toString())
     );
 
-    const allOrders = [...activeOrders, ...completedOrders];
-    allOrders.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    const allOrders = [...activeOrders, ...completedOrders]
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     const formatted = allOrders.map(o => ({
-      id: o._id,
+      _id: o._id,
       items: o.items,
       totalAmount: o.totalAmount,
       orderStatus: o.orderStatus,
       paymentStatus: o.paymentStatus,
       paymentMethod: o.paymentMethod,
       placedDate: o.createdAt,
-      shipping: o.shippingAddress,
-      isCompleted: completedMap.has(o._id.toString())
+      shippingAddress: o.shippingAddress,
+      isCompleted: completedSet.has(o._id.toString())
     }));
 
     res.status(200).json({ success: true, orders: formatted });
 
-  } catch (error) {
+  } catch {
     res.status(500).json({ success: false, message: 'Failed to fetch orders' });
   }
 };
 
-// ----------------------------
-// GET ORDER DETAILS
-// ----------------------------
+/* ----------------------------
+   GET ORDER DETAILS
+---------------------------- */
 exports.getOrderDetails = async (req, res) => {
   try {
     const order = await Order.findOne({
@@ -269,7 +254,7 @@ exports.getOrderDetails = async (req, res) => {
     }
 
     res.status(200).json({ success: true, order });
-  } catch (error) {
+  } catch {
     res.status(500).json({ success: false, message: 'Failed to fetch order details' });
   }
 };

@@ -52,7 +52,9 @@ exports.getPendingOrders = async (req, res) => {
 // ----------------------------
 // Update order status (SAFE)
 // ----------------------------
+
 exports.updateOrderStatus = async (req, res) => {
+  console.log('🔄 updateOrderStatus:', req.body);
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -63,32 +65,47 @@ exports.updateOrderStatus = async (req, res) => {
     const order = await Order.findById(id).session(session);
     if (!order) {
       await session.abortTransaction();
-      return res.status(404).json({ success: false, message: 'Order not found' });
+      session.endSession();
+      return res
+        .status(404)
+        .json({ success: false, message: 'Order not found' });
     }
 
+    // Update status
     order.orderStatus = orderStatus;
 
+    // COD auto-paid when delivered
     if (order.paymentMethod === 'COD' && orderStatus === 'Delivered') {
       order.paymentStatus = 'Paid';
     }
 
+    // Move to history on Delivered / Cancelled
     if (orderStatus === 'Delivered' || orderStatus === 'Cancelled') {
       const exists = await OrderHistory.findOne(
         { originalOrderId: order._id }
       ).session(session);
 
       if (!exists) {
-        const orderData = order.toObject();
-        delete orderData._id;
-
-        await OrderHistory.create([{
-          ...orderData,
-          originalOrderId: order._id,
-          completedAt: new Date(),
-        }], { session });
+        await OrderHistory.create(
+          [
+            {
+              originalOrderId: order._id,
+              userId: order.userId,
+              items: order.items,
+              totalAmount: order.totalAmount,
+              shippingAddress: order.shippingAddress,
+              orderStatus: order.orderStatus,
+              paymentStatus: order.paymentStatus,
+              paymentMethod: order.paymentMethod,
+              transactionId: order.transactionId || null,
+              completedAt: new Date(),
+            },
+          ],
+          { session }
+        );
       }
 
-      await Order.deleteOne({ _id: order._id }).session(session);
+      await Order.deleteOne({ _id: order._id }, { session });
 
       await session.commitTransaction();
       session.endSession();
@@ -99,28 +116,29 @@ exports.updateOrderStatus = async (req, res) => {
       });
     }
 
+    // Just save status update (Pending → Shipped)
     await order.save({ session });
+
     await session.commitTransaction();
     session.endSession();
 
-    const cleanedOrder = await cleanOrder(order);
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Order status updated successfully',
-      order: cleanedOrder,
     });
 
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
 
-    res.status(500).json({
+    console.error('❌ updateOrderStatus error:', error);
+
+    return res.status(500).json({
       success: false,
       message: 'Failed to update order',
     });
   }
 };
-
 // ----------------------------
 // Get all order history
 // ----------------------------

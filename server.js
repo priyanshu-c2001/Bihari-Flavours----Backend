@@ -23,6 +23,7 @@ app.use(cors({
   credentials: true
 }));
 connectDB();
+app.use(express.json());
 app.use(cookieParser());
 
 
@@ -34,7 +35,6 @@ app.use("/api/orders", orderRoutes); // ✅ Use order routes
 // --------------------
 // Routes
 // --------------------
-app.use(express.json());
 app.use("/api/otp", otpRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/products", productRoutes);
