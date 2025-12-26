@@ -51,7 +51,7 @@ const transactionSchema = new mongoose.Schema({
   // UNCHANGED enum
   paymentMethod: {
     type: String,
-    enum: ['UPI','COD','Credit Card','Debit Card','Net Banking','Online'],
+    enum: ['UPI','COD','Credit Card','Debit Card','Net Banking','ONLINE'],
     required: true
   },
 
