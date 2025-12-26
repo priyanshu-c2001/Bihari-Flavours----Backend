@@ -36,11 +36,17 @@ exports.getPendingOrders = async (req, res) => {
   try {
     const orders = await Order.find({
       orderStatus: { $nin: ['Delivered', 'Cancelled'] }
-    }).sort({ createdAt: -1 });
+    }).populate('userId', 'name phone').sort({ createdAt: -1 });
 
     const cleanedOrders = await Promise.all(orders.map(cleanOrder));
 
-    res.status(200).json({ success: true, orders: cleanedOrders });
+    // Enrich with user data
+    const enrichedOrders = cleanedOrders.map((order, idx) => ({
+      ...order,
+      user: orders[idx].userId
+    }));
+
+    res.status(200).json({ success: true, orders: enrichedOrders });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -145,10 +151,19 @@ exports.updateOrderStatus = async (req, res) => {
 exports.getOrderHistory = async (req, res) => {
   try {
     const history = await OrderHistory.find()
-      .sort({ completedAt: -1 })
-      .lean();
+      .populate('userId', 'name phone')
+      .sort({ completedAt: -1 });
 
-    res.status(200).json({ success: true, orders: history });
+    // Enrich with customerName/Phone and user data
+    const enrichedHistory = history.map(h => {
+      const obj = h.toObject ? h.toObject() : h;
+      obj.customerName = obj.userId?.name || obj.shippingAddress?.name || '';
+      obj.customerPhone = obj.userId?.phone || obj.shippingAddress?.phone || '';
+      obj.user = obj.userId;
+      return obj;
+    });
+
+    res.status(200).json({ success: true, orders: enrichedHistory });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -162,16 +177,46 @@ exports.getOrderHistory = async (req, res) => {
 // ----------------------------
 exports.getOrderById = async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id);
+    const order = await Order.findById(req.params.id).populate('userId', 'name phone');
     if (!order)
       return res.status(404).json({ success: false, message: 'Order not found' });
 
     const cleanedOrder = await cleanOrder(order);
-    res.status(200).json({ success: true, order: cleanedOrder });
+    res.status(200).json({ 
+      success: true, 
+      order: cleanedOrder,
+      user: order.userId
+    });
   } catch (error) {
     res.status(500).json({
       success: false,
       message: 'Failed to fetch order',
+    });
+  }
+};
+
+// ----------------------------
+// Get order history by ID (admin)
+// ----------------------------
+exports.getOrderHistoryById = async (req, res) => {
+  try {
+    const history = await OrderHistory.findById(req.params.id).populate('userId', 'name phone');
+    if (!history)
+      return res.status(404).json({ success: false, message: 'Order history not found' });
+
+    const obj = history.toObject ? history.toObject() : history;
+    obj.customerName = obj.userId?.name || obj.shippingAddress?.name || '';
+    obj.customerPhone = obj.userId?.phone || obj.shippingAddress?.phone || '';
+
+    res.status(200).json({ 
+      success: true, 
+      history: obj,
+      user: obj.userId
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch order history',
     });
   }
 };

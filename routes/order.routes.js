@@ -15,6 +15,7 @@ const {
   updateOrderStatus,
   getOrderHistory,
   getOrderById,
+  getOrderHistoryById,
 } = require('../controllers/adminorder.controller');
 
 const { protect } = require('../middleware/auth.middleware');
@@ -53,5 +54,8 @@ router.get('/admin/orders/details/:id', protect, adminProtect, getOrderById);
 
 // Order history
 router.get('/admin/history', protect, adminProtect, getOrderHistory);
+
+// Get order history by ID (admin)
+router.get('/admin/history/:id', protect, adminProtect, getOrderHistoryById);
 
 module.exports = router;
