@@ -1,8 +1,8 @@
 const express = require("express");
 const router = express.Router();
 const upload = require("../middleware/multer");
-const { protect } = require("../middleware/auth.middleware");
 const { adminProtect } = require("../middleware/admin.middleware");
+
 const {
   addProduct,
   getProducts,
@@ -11,14 +11,33 @@ const {
   deleteProduct,
 } = require("../controllers/product.controller");
 
-// ✅ All routes require valid token
-// ✅ Authenticated users (normal or admin) can view
+/* =====================
+   PUBLIC ROUTES
+===================== */
 router.get("/", getProducts);
 router.get("/:id", getProductById);
 
-// ✅ Admin-only routes
-router.post("/", adminProtect, upload.single("photo"), addProduct);
-router.put("/:id", adminProtect, upload.single("photo"), updateProduct);
-router.delete("/:id", adminProtect, deleteProduct);
+/* =====================
+   ADMIN ROUTES
+===================== */
+router.post(
+  "/",
+  adminProtect,
+  upload.array("photos", 6), // 🔁 CHANGED
+  addProduct
+);
+
+router.put(
+  "/:id",
+  adminProtect,
+  upload.array("photos", 6), // 🔁 CHANGED
+  updateProduct
+);
+
+router.delete(
+  "/:id",
+  adminProtect,
+  deleteProduct
+);
 
 module.exports = router;

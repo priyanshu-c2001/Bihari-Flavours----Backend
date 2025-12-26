@@ -8,63 +8,89 @@ exports.addToCart = async (req, res) => {
     const { productId } = req.body;
 
     if (!productId) {
-      return res.status(400).json({ success: false, message: "Product ID is required" });
+      return res.status(400).json({
+        success: false,
+        message: "Product ID is required"
+      });
     }
 
     const product = await Product.findById(productId);
     if (!product) {
-      return res.status(404).json({ success: false, message: "Product not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Product not found"
+      });
+    }
+
+    if (!product.photos || product.photos.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Product has no images"
+      });
     }
 
     if (product.quantity !== "instock") {
-      return res.status(400).json({ success: false, message: "Product is out of stock" });
+      return res.status(400).json({
+        success: false,
+        message: "Product is out of stock"
+      });
     }
+
+    const mainImage = product.photos[0]; // ✅ MAIN IMAGE
 
     let cart = await Cart.findOne({ userId });
 
     if (cart) {
-      const existingItemIndex = cart.cartItems.findIndex(
+      const index = cart.cartItems.findIndex(
         item => item.productId.toString() === productId
       );
 
-      if (existingItemIndex >= 0) {
-        cart.cartItems[existingItemIndex].quantity += 1;
+      if (index >= 0) {
+        cart.cartItems[index].quantity += 1;
       } else {
         cart.cartItems.push({
           productId,
-          photo: product.photo,
+          photo: mainImage,
           name: product.name,
           quantity: 1,
           price: product.price
         });
       }
-
-      cart.totalAmount = cart.cartItems.reduce((acc, item) => acc + item.price * item.quantity, 0);
-      await cart.save();
     } else {
-      cart = await Cart.create({
+      cart = new Cart({
         userId,
         cartItems: [{
           productId,
-          photo: product.photo,
+          photo: mainImage,
           name: product.name,
           quantity: 1,
           price: product.price
-        }],
-        totalAmount: product.price
+        }]
       });
     }
+
+    cart.totalAmount = cart.cartItems.reduce(
+      (sum, item) => sum + item.price * item.quantity,
+      0
+    );
+
+    await cart.save();
 
     res.status(200).json({
       success: true,
       message: "Product added to cart successfully",
       cart
     });
+
   } catch (error) {
     console.error("Add to cart error:", error);
-    res.status(500).json({ success: false, message: "Failed to add to cart", error: error.message });
+    res.status(500).json({
+      success: false,
+      message: "Failed to add to cart"
+    });
   }
 };
+
 
 // Update Cart (update quantity or remove product)
 exports.updateCart = async (req, res) => {
