@@ -2,21 +2,25 @@ const mongoose = require('mongoose');
 const crypto = require('crypto');
 
 const Order = require('../models/order.model');
+const TempOrder = require('../models/temporder.model'); // 🟢 NEW
 const TransactionModel = require('../models/transaction.model');
 const OrderHistory = require('../models/orderhistory.model');
 const Coupon = require('../models/coupon.model');
 const Cart = require('../models/cart.model');
 const razorpay = require('../config/razorpay');
 
-/* ----------------------------
+/* ======================================================
    VERIFY COUPON
----------------------------- */
+====================================================== */
 exports.verifyCoupon = async (req, res) => {
   try {
     const { couponCode, totalAmount } = req.body;
 
     if (!couponCode) {
-      return res.status(400).json({ success: false, message: 'Coupon code is required' });
+      return res.status(400).json({
+        success: false,
+        message: 'Coupon code is required'
+      });
     }
 
     const coupon = await Coupon.findOne({
@@ -28,26 +32,31 @@ exports.verifyCoupon = async (req, res) => {
     });
 
     if (!coupon) {
-      return res.status(400).json({ success: false, message: 'Coupon not applicable' });
+      return res.status(400).json({
+        success: false,
+        message: 'Coupon not applicable'
+      });
     }
 
     res.status(200).json({
       success: true,
       coupon: {
         code: coupon.code,
-        discountPercentage: coupon.discountPercentage,
-        minPurchase: coupon.minPurchase,
-        maxPurchase: coupon.maxPurchase
+        discountPercentage: coupon.discountPercentage
       }
     });
-  } catch {
-    res.status(500).json({ success: false, message: 'Coupon verification failed' });
+
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: 'Coupon verification failed'
+    });
   }
 };
 
-/* ----------------------------
-   CREATE ORDER (TRANSACTION SAFE)
----------------------------- */
+/* ======================================================
+   CREATE ORDER
+====================================================== */
 exports.createOrder = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -56,11 +65,23 @@ exports.createOrder = async (req, res) => {
     const { items, shippingAddress, paymentMethod, couponCode } = req.body;
     const userId = req.user._id;
 
-    if (!items || !items.length) throw new Error('Cart is empty');
+    if (!items || items.length === 0) {
+      throw new Error('Cart is empty');
+    }
 
-    let totalAmount = items.reduce((s, i) => s + i.price * i.quantity, 0);
+    /* ----------------------------
+       CALCULATE TOTAL
+    ---------------------------- */
+    let totalAmount = items.reduce(
+      (sum, item) => sum + item.price * item.quantity,
+      0
+    );
+
     let coupon = null;
 
+    /* ----------------------------
+       APPLY COUPON
+    ---------------------------- */
     if (couponCode) {
       coupon = await Coupon.findOneAndUpdate(
         {
@@ -74,22 +95,30 @@ exports.createOrder = async (req, res) => {
         { new: true, session }
       );
 
-      if (!coupon) throw new Error('Coupon not applicable');
+      if (!coupon) {
+        throw new Error('Coupon not applicable');
+      }
+
       totalAmount -= (totalAmount * coupon.discountPercentage) / 100;
     }
 
-    const [order] = await Order.create([{
-      userId,
-      items,
-      shippingAddress,
-      paymentMethod,
-      totalAmount,
-      couponId: coupon?._id,
-      paymentStatus: 'Pending'
-    }], { session });
-
-    /* COD FLOW */
+    /* ======================================================
+       COD FLOW (DIRECT ORDER)
+    ====================================================== */
     if (paymentMethod === 'COD') {
+      totalAmount += 20; // 🟢 ADD COD CHARGE
+
+      const [order] = await Order.create([{
+        userId,
+        items,
+        shippingAddress,
+        paymentMethod,
+        totalAmount,
+        couponId: coupon?._id,
+        paymentStatus: 'Pending'
+      }], { session });
+
+      // Clear cart immediately
       await Cart.findOneAndUpdate(
         { userId },
         { $set: { cartItems: [], totalAmount: 0 } },
@@ -106,155 +135,155 @@ exports.createOrder = async (req, res) => {
       });
     }
 
-    /* ONLINE PAYMENT */
+    /* ======================================================
+       ONLINE PAYMENT → TEMP ORDER
+    ====================================================== */
+    const [tempOrder] = await TempOrder.create([{
+      userId,
+      items,
+      shippingAddress,
+      paymentMethod,
+      totalAmount,
+      couponId: coupon?._id,
+      paymentStatus: 'Pending'
+    }], { session });
+
     const razorpayOrder = await razorpay.orders.create({
       amount: Math.round(totalAmount * 100),
       currency: 'INR',
-      receipt: order._id.toString()
+      receipt: tempOrder._id.toString()
     });
 
-    order.razorpayOrderId = razorpayOrder.id;
-    await order.save({ session });
+    tempOrder.razorpayOrderId = razorpayOrder.id;
+    await tempOrder.save({ session });
 
     await session.commitTransaction();
     session.endSession();
 
-    res.status(200).json({ success: true, order, razorpayOrder });
+    return res.status(200).json({
+      success: true,
+      tempOrderId: tempOrder._id,
+      razorpayOrder
+    });
 
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
-    res.status(400).json({ success: false, message: error.message });
+
+    return res.status(400).json({
+      success: false,
+      message: error.message
+    });
   }
 };
 
-/* ----------------------------
-   RAZORPAY WEBHOOK (TRANSACTION SAFE)
----------------------------- */
+/* ======================================================
+   RAZORPAY WEBHOOK
+====================================================== */
 exports.razorpayWebhook = async (req, res) => {
-  console.log('🔔 Razorpay Webhook received');
-
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
-    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    /* ----------------------------
+       VERIFY SIGNATURE
+    ---------------------------- */
     const signature = req.headers['x-razorpay-signature'];
-   console.log('Webhook Signature:', signature);
     const expectedSignature = crypto
-      .createHmac('sha256', webhookSecret)
+      .createHmac('sha256', process.env.RAZORPAY_WEBHOOK_SECRET)
       .update(req.body)
       .digest('hex');
-console.log('Expected Signature:', expectedSignature);
-    if (expectedSignature !== signature) {
+
+    if (signature !== expectedSignature) {
       return res.status(400).json({
         success: false,
         message: 'Invalid webhook signature'
       });
     }
-    console.log('Webhook signature verified');
 
     const event = JSON.parse(req.body.toString());
-    const eventType = event.event;
+    const payment = event.payload?.payment?.entity;
 
-    /* ----------------------------
+    /* ======================================================
        PAYMENT SUCCESS
-    ---------------------------- */
-    if (eventType === 'payment.captured') {
-      console.log('Processing payment.captured');
+    ====================================================== */
+    if (event.event === 'payment.captured') {
 
-      const payment = event.payload.payment.entity;
-      const order = await Order.findOne({
+      const tempOrder = await TempOrder.findOne({
         razorpayOrderId: payment.order_id
       }).session(session);
 
-      if (!order) throw new Error('Order not found');
-
-      if (order.paymentStatus === 'Paid') {
-        await session.commitTransaction();
-        session.endSession();
-        return res.status(200).json({ success: true, message: 'Already processed' });
+      if (!tempOrder) {
+        throw new Error('Temp order not found');
       }
 
-      order.paymentStatus = 'Paid';
-      await order.save({ session });
+      // Create real order
+      const [order] = await Order.create([{
+        userId: tempOrder.userId,
+        items: tempOrder.items,
+        shippingAddress: tempOrder.shippingAddress,
+        paymentMethod: tempOrder.paymentMethod,
+        totalAmount: tempOrder.totalAmount,
+        couponId: tempOrder.couponId,
+        paymentStatus: 'Paid',
+        razorpayOrderId: tempOrder.razorpayOrderId
+      }], { session });
 
-      const exists = await TransactionModel.findOne({
+      // Create transaction
+      await TransactionModel.create([{
+        orderId: order._id,
+        userId: order.userId,
+        items: order.items,
+        amount: order.totalAmount,
+        paymentMethod: 'ONLINE',
+        paymentStatus: 'Success',
         transactionId: payment.id
-      }).session(session);
+      }], { session });
 
-      if (!exists) {
-        const txn = await TransactionModel.create([{
-          orderId: order._id,
-          userId: order.userId,
-          items: order.items,
-          amount: order.totalAmount,
-          paymentMethod: order.paymentMethod,
-          paymentStatus: 'Success',
-          transactionId: payment.id
-        }], { session });
-
-        order.transactionId = txn[0]._id;
-        await order.save({ session });
-      }
-
-      // Clear cart AFTER payment success
+      // Clear cart
       await Cart.findOneAndUpdate(
         { userId: order.userId },
         { $set: { cartItems: [], totalAmount: 0 } },
         { session }
       );
 
+      // Delete temp order
+      await TempOrder.deleteOne({ _id: tempOrder._id }).session(session);
+
       await session.commitTransaction();
       session.endSession();
 
       return res.status(200).json({
         success: true,
-        message: 'Payment processed successfully'
+        message: 'Payment successful'
       });
     }
 
-    /* ----------------------------
+    /* ======================================================
        PAYMENT FAILED
-    ---------------------------- */
-    if (eventType === 'payment.failed') {
-      console.log('Processing payment.failed');
+    ====================================================== */
+    if (event.event === 'payment.failed') {
 
-      const payment = event.payload.payment.entity;
-      const order = await Order.findOne({
+      const tempOrder = await TempOrder.findOne({
         razorpayOrderId: payment.order_id
       }).session(session);
 
-      if (!order) {
-        await session.commitTransaction();
-        session.endSession();
-        return res.status(200).json({ success: true, message: 'Order already removed' });
-      }
-
-      // Safety: do NOT delete paid orders
-      if (order.paymentStatus === 'Paid') {
-        await session.commitTransaction();
-        session.endSession();
-        return res.status(200).json({ success: true, message: 'Order already paid' });
-      }
-
-      // OPTIONAL: restore coupon usage
-      if (order.couponId) {
+      if (tempOrder?.couponId) {
         await Coupon.findByIdAndUpdate(
-          order.couponId,
+          tempOrder.couponId,
           { $inc: { usageLimit: 1 } },
           { session }
         );
       }
 
-      await Order.deleteOne({ _id: order._id }).session(session);
+      await TempOrder.deleteOne({ _id: tempOrder?._id }).session(session);
 
       await session.commitTransaction();
       session.endSession();
 
       return res.status(200).json({
         success: true,
-        message: 'Order deleted due to payment failure'
+        message: 'Payment failed, temp order removed'
       });
     }
 
@@ -263,10 +292,8 @@ console.log('Expected Signature:', expectedSignature);
     ---------------------------- */
     await session.commitTransaction();
     session.endSession();
-    return res.status(200).json({
-      success: true,
-      message: 'Event ignored'
-    });
+
+    res.status(200).json({ success: true });
 
   } catch (error) {
     await session.abortTransaction();
@@ -280,46 +307,31 @@ console.log('Expected Signature:', expectedSignature);
   }
 };
 
-
-/* ----------------------------
-   GET USER ORDERS (FIXED SHAPE)
----------------------------- */
+/* ======================================================
+   GET USER ORDERS
+====================================================== */
 exports.getUserOrders = async (req, res) => {
   try {
     const userId = req.user._id;
 
-    const activeOrders = await Order.find({ userId }).lean();
-    const completedOrders = await OrderHistory.find({ userId }).lean();
+    const orders = await Order.find({ userId }).sort({ createdAt: -1 });
 
-    const completedSet = new Set(
-      completedOrders.map(o => o.originalOrderId.toString())
-    );
-
-    const allOrders = [...activeOrders, ...completedOrders]
-      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
-    const formatted = allOrders.map(o => ({
-      _id: o._id,
-      items: o.items,
-      totalAmount: o.totalAmount,
-      orderStatus: o.orderStatus,
-      paymentStatus: o.paymentStatus,
-      paymentMethod: o.paymentMethod,
-      placedDate: o.createdAt,
-      shippingAddress: o.shippingAddress,
-      isCompleted: completedSet.has(o._id.toString())
-    }));
-
-    res.status(200).json({ success: true, orders: formatted });
+    res.status(200).json({
+      success: true,
+      orders
+    });
 
   } catch {
-    res.status(500).json({ success: false, message: 'Failed to fetch orders' });
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch orders'
+    });
   }
 };
 
-/* ----------------------------
+/* ======================================================
    GET ORDER DETAILS
----------------------------- */
+====================================================== */
 exports.getOrderDetails = async (req, res) => {
   try {
     const order = await Order.findOne({
@@ -328,11 +340,21 @@ exports.getOrderDetails = async (req, res) => {
     });
 
     if (!order) {
-      return res.status(404).json({ success: false, message: 'Order not found' });
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found'
+      });
     }
 
-    res.status(200).json({ success: true, order });
+    res.status(200).json({
+      success: true,
+      order
+    });
+
   } catch {
-    res.status(500).json({ success: false, message: 'Failed to fetch order details' });
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch order details'
+    });
   }
 };

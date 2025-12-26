@@ -15,7 +15,8 @@ const {razorpayWebhook} = require("./controllers/order.controller");
 
 const app = express();
 
-
+// 🔥 START CRON JOBS
+require('./jobs/tempOrderCleanup');
 // --------------------
 // Middlewares
 // --------------------
