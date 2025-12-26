@@ -1,16 +1,11 @@
 const User = require("../models/user.model");
 const Otp = require("../models/otp.model");
 const { generateToken } = require("../utils/jwt");
-const { formatPhoneNumber } = require("../utils/twilio");
+const { getPhoneVariants } = require("../utils/fast2sms.util");
 
 const isProduction = process.env.USE_HTTPS === "true";
 
-/**
- * Unified cookie options
- * Works for:
- * - HTTPS browsers (cookies)
- * - Cross-domain frontend (Render / Vercel)
- */
+/* ---------------- COOKIE OPTIONS ---------------- */
 const cookieOptions = {
   httpOnly: true,
   secure: isProduction,
@@ -19,17 +14,31 @@ const cookieOptions = {
   path: "/",
 };
 
-// =====================
-// SIGNUP
-// =====================
+/* =====================
+   SIGNUP
+===================== */
 exports.signup = async (req, res) => {
   try {
     let { name, phone, password } = req.body;
-    phone = formatPhoneNumber(phone);
 
-    // OTP must be verified
-    const otpEntry = await Otp.findOne({ phone });
-    if (!otpEntry || otpEntry.status !== "verified") {
+    if (!name || !phone || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "All fields are required",
+      });
+    }
+
+    // Normalize phone → +91 format
+    const { e164 } = getPhoneVariants(phone);
+
+    // OTP must be verified for signup
+    const otpEntry = await Otp.findOne({
+      phone: e164,
+      purpose: "signup",
+      status: "verified",
+    });
+
+    if (!otpEntry) {
       return res.status(400).json({
         success: false,
         message: "OTP not verified",
@@ -37,7 +46,7 @@ exports.signup = async (req, res) => {
     }
 
     // Prevent duplicate user
-    const existingUser = await User.findOne({ phone });
+    const existingUser = await User.findOne({ phone: e164 });
     if (existingUser) {
       return res.status(400).json({
         success: false,
@@ -48,15 +57,18 @@ exports.signup = async (req, res) => {
     // Create user
     const newUser = await User.create({
       name,
-      phone,
+      phone: e164,
       password,
       role: "user",
     });
 
-    // Generate JWT (should contain minimal payload internally)
+    // Cleanup OTP after successful signup
+    await Otp.deleteOne({ _id: otpEntry._id });
+
+    // Generate JWT
     const token = generateToken(newUser);
 
-    // Set cookie (HTTPS browsers)
+    // Set cookie
     res.cookie("token", token, cookieOptions);
 
     const responseData = {
@@ -69,31 +81,39 @@ exports.signup = async (req, res) => {
       },
     };
 
-    // Token only for HTTP / Postman / dev usage
     if (!isProduction) {
       responseData.token = token;
     }
 
-    res.status(201).json(responseData);
+    return res.status(201).json(responseData);
 
   } catch (error) {
-    console.error("Signup error:", error.message);
-    res.status(500).json({
+    console.error("Signup error:", error);
+    return res.status(500).json({
       success: false,
       message: "Signup failed",
     });
   }
 };
 
-// =====================
-// SIGNIN
-// =====================
+/* =====================
+   SIGNIN (PASSWORD)
+===================== */
 exports.signin = async (req, res) => {
   try {
     let { phone, password } = req.body;
-    phone = formatPhoneNumber(phone);
 
-    const user = await User.findOne({ phone });
+    if (!phone || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Phone and password are required",
+      });
+    }
+
+    // Normalize phone → +91 format
+    const { e164 } = getPhoneVariants(phone);
+
+    const user = await User.findOne({ phone: e164 });
     if (!user) {
       return res.status(400).json({
         success: false,
@@ -124,21 +144,21 @@ exports.signin = async (req, res) => {
       },
     };
 
-    // Token only in dev / HTTP mode
     if (!isProduction) {
       responseData.token = token;
     }
 
-    res.status(200).json(responseData);
+    return res.status(200).json(responseData);
 
   } catch (error) {
-    console.error("Signin error:", error.message);
-    res.status(500).json({
+    console.error("Signin error:", error);
+    return res.status(500).json({
       success: false,
       message: "Login failed",
     });
   }
 };
+
 
 // =====================
 // LOGOUT
@@ -147,14 +167,17 @@ exports.logout = async (req, res) => {
   try {
     res.clearCookie("token", cookieOptions);
 
-    res.status(200).json({
+    
+    res.clearCookie("token");
+
+    return res.status(200).json({
       success: true,
       message: "Logged out successfully",
     });
 
   } catch (error) {
-    console.error("Logout error:", error.message);
-    res.status(500).json({
+    console.error("Logout error:", error);
+    return res.status(500).json({
       success: false,
       message: "Logout failed",
     });

@@ -1,7 +1,10 @@
-const { sendOtp, verifyOtp, formatPhoneNumber } = require("../utils/twilio");
+const { sendOtpSMS, getPhoneVariants } = require("../utils/fast2sms.util");
 const Otp = require("../models/otp.model");
 const User = require("../models/user.model");
 const { generateToken } = require("../utils/jwt");
+const VALID_PURPOSES = ["signup", "login", "forgot"];
+
+
 
 const isProduction = process.env.USE_HTTPS === "true";
 
@@ -13,11 +16,6 @@ const cookieOptions = {
   path: "/",
 };
 
-const VALID_PURPOSES = ["signup", "login", "forgot"];
-
-// =====================
-// SEND OTP
-// =====================
 exports.sendOtpController = async (req, res) => {
   try {
     let { phone, purpose } = req.body;
@@ -29,9 +27,10 @@ exports.sendOtpController = async (req, res) => {
       });
     }
 
-    phone = formatPhoneNumber(phone);
+    // Normalize phone
+    const { local, e164 } = getPhoneVariants(phone);
 
-    const existingUser = await User.findOne({ phone });
+    const existingUser = await User.findOne({ phone: e164 });
 
     if (purpose === "signup" && existingUser) {
       return res.status(400).json({
@@ -47,13 +46,24 @@ exports.sendOtpController = async (req, res) => {
       });
     }
 
-    await sendOtp(phone);
+    // Generate OTP (6-digit)
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
+    // Save OTP (overwrite previous)
     await Otp.findOneAndUpdate(
-      { phone },
-      { phone, verified: false, status: "pending", createdAt: new Date() },
+      { phone: e164, purpose },
+      {
+        phone: e164,
+        purpose,
+        otp,
+        status: "pending",
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000), // 5 min
+      },
       { upsert: true, new: true }
     );
+
+    // Send OTP via Fast2SMS (10-digit only)
+    await sendOtpSMS(local, otp);
 
     res.status(200).json({
       success: true,
@@ -70,37 +80,59 @@ exports.sendOtpController = async (req, res) => {
   }
 };
 
-// =====================
-// RESEND OTP
-// =====================
 exports.resendOtpController = async (req, res) => {
   try {
-    let { phone } = req.body;
+    let { phone, purpose } = req.body;
 
-    if (!phone) {
+    if (!phone || !purpose || !VALID_PURPOSES.includes(purpose)) {
       return res.status(400).json({
         success: false,
-        message: "Phone number is required",
+        message: "Invalid phone or purpose",
       });
     }
 
-    phone = formatPhoneNumber(phone);
+    // Normalize phone
+    const { local, e164 } = getPhoneVariants(phone);
 
-    await sendOtp(phone);
+    // Check existing OTP
+    const existingOtp = await Otp.findOne({
+      phone: e164,
+      purpose,
+      status: "pending",
+    });
 
+    if (!existingOtp) {
+      return res.status(404).json({
+        success: false,
+        message: "No OTP found. Please request a new OTP.",
+      });
+    }
+
+    // Generate new OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+    // Update OTP
     await Otp.findOneAndUpdate(
-      { phone },
-      { verified: false, status: "pending", createdAt: new Date() },
-      { upsert: true, new: true }
+      { phone: e164, purpose },
+      {
+        otp,
+        status: "pending",
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000), // reset expiry
+      },
+      { new: true }
     );
+
+    // DEV MODE: logs OTP instead of sending SMS
+    await sendOtpSMS(local, otp);
 
     res.status(200).json({
       success: true,
       message: "OTP resent successfully",
+      purpose,
     });
 
   } catch (error) {
-    console.error("Resend OTP error:", error.message);
+    console.error("Resend OTP error:", error);
     res.status(500).json({
       success: false,
       message: "Failed to resend OTP",
@@ -108,46 +140,67 @@ exports.resendOtpController = async (req, res) => {
   }
 };
 
+
 // =====================
 // VERIFY OTP
 // =====================
+
 exports.verifyOtpController = async (req, res) => {
   try {
     let { phone, code, purpose } = req.body;
 
-    if (!phone || !code || !VALID_PURPOSES.includes(purpose)) {
+    if (!phone || !code || !purpose || !VALID_PURPOSES.includes(purpose)) {
       return res.status(400).json({
         success: false,
         message: "Invalid request",
       });
     }
 
-    phone = formatPhoneNumber(phone);
+    // Normalize phone
+    const { e164 } = getPhoneVariants(phone);
 
-    const verification = await verifyOtp(phone, code);
-    if (!verification || verification.status !== "approved") {
+    // Find OTP entry
+    const otpEntry = await Otp.findOne({
+      phone: e164,
+      purpose,
+      status: "pending",
+    });
+
+    if (!otpEntry) {
+      return res.status(400).json({
+        success: false,
+        message: "OTP not found or already used",
+      });
+    }
+
+    // Check expiry
+    if (otpEntry.expiresAt < new Date()) {
+      otpEntry.status = "expired";
+      await otpEntry.save();
+
+      return res.status(400).json({
+        success: false,
+        message: "OTP expired",
+      });
+    }
+
+    // Check OTP match
+    if (otpEntry.otp !== code) {
       return res.status(400).json({
         success: false,
         message: "Invalid OTP",
       });
     }
 
-    const otpEntry = await Otp.findOne({ phone });
-    if (!otpEntry) {
-      return res.status(404).json({
-        success: false,
-        message: "OTP not found",
-      });
-    }
+    /* =====================
+       OTP VERIFIED
+    ===================== */
 
-    otpEntry.verified = true;
-    otpEntry.status = "verified";
-    otpEntry.createdAt = new Date();
-    await otpEntry.save();
-
-    // Login / Forgot flow
     if (purpose === "login" || purpose === "forgot") {
-      const user = await User.findOne({ phone }).select("-password");
+      // 🔴 DELETE OTP for login & forgot
+      await Otp.deleteOne({ _id: otpEntry._id });
+
+      const user = await User.findOne({ phone: e164 }).select("-password");
 
       if (!user) {
         return res.status(404).json({
@@ -158,7 +211,6 @@ exports.verifyOtpController = async (req, res) => {
 
       const token = generateToken(user);
 
-      // Always set cookie (safe for dev & prod)
       res.cookie("token", token, cookieOptions);
 
       const responseData = {
@@ -171,7 +223,6 @@ exports.verifyOtpController = async (req, res) => {
         },
       };
 
-      // Token only exposed in dev / HTTP mode
       if (!isProduction) {
         responseData.token = token;
       }
@@ -179,14 +230,21 @@ exports.verifyOtpController = async (req, res) => {
       return res.status(200).json(responseData);
     }
 
-    // Signup flow → only verification
+    /* =====================
+       SIGNUP FLOW
+       (KEEP OTP)
+    ===================== */
+
+    otpEntry.status = "verified";
+    await otpEntry.save();
+
     return res.status(200).json({
       success: true,
       message: "OTP verified successfully",
     });
 
   } catch (error) {
-    console.error("Verify OTP error:", error.message);
+    console.error("Verify OTP error:", error);
     res.status(500).json({
       success: false,
       message: "OTP verification failed",

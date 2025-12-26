@@ -58,9 +58,9 @@ exports.getPendingOrders = async (req, res) => {
 // ----------------------------
 // Update order status (SAFE)
 // ----------------------------
-
 exports.updateOrderStatus = async (req, res) => {
-  console.log('🔄 updateOrderStatus:', req.body);
+  console.log("🔄 updateOrderStatus:", req.body);
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -68,28 +68,44 @@ exports.updateOrderStatus = async (req, res) => {
     const { id } = req.params;
     const { orderStatus } = req.body;
 
+    if (!orderStatus) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({
+        success: false,
+        message: "orderStatus is required",
+      });
+    }
+
     const order = await Order.findById(id).session(session);
     if (!order) {
       await session.abortTransaction();
       session.endSession();
-      return res
-        .status(404)
-        .json({ success: false, message: 'Order not found' });
+      return res.status(404).json({
+        success: false,
+        message: "Order not found",
+      });
     }
 
-    // Update status
-    order.orderStatus = orderStatus;
+    /* =====================
+       PREPARE UPDATE
+    ===================== */
+    const update = {
+      orderStatus,
+    };
 
     // COD auto-paid when delivered
-    if (order.paymentMethod === 'COD' && orderStatus === 'Delivered') {
-      order.paymentStatus = 'Paid';
+    if (order.paymentMethod === "COD" && orderStatus === "Delivered") {
+      update.paymentStatus = "Paid";
     }
 
-    // Move to history on Delivered / Cancelled
-    if (orderStatus === 'Delivered' || orderStatus === 'Cancelled') {
-      const exists = await OrderHistory.findOne(
-        { originalOrderId: order._id }
-      ).session(session);
+    /* =====================
+       MOVE TO HISTORY
+    ===================== */
+    if (orderStatus === "Delivered" || orderStatus === "Cancelled") {
+      const exists = await OrderHistory.findOne({
+        originalOrderId: order._id,
+      }).session(session);
 
       if (!exists) {
         await OrderHistory.create(
@@ -100,8 +116,11 @@ exports.updateOrderStatus = async (req, res) => {
               items: order.items,
               totalAmount: order.totalAmount,
               shippingAddress: order.shippingAddress,
-              orderStatus: order.orderStatus,
-              paymentStatus: order.paymentStatus,
+              orderStatus,
+              paymentStatus:
+                order.paymentMethod === "COD" && orderStatus === "Delivered"
+                  ? "Paid"
+                  : order.paymentStatus,
               paymentMethod: order.paymentMethod,
               transactionId: order.transactionId || null,
               completedAt: new Date(),
@@ -111,6 +130,10 @@ exports.updateOrderStatus = async (req, res) => {
         );
       }
 
+      // 🔔 STATUS UPDATE (HOOK WILL FIRE)
+      await Order.findByIdAndUpdate(order._id, { $set: update }, { session });
+
+      // Remove active order
       await Order.deleteOne({ _id: order._id }, { session });
 
       await session.commitTransaction();
@@ -122,29 +145,38 @@ exports.updateOrderStatus = async (req, res) => {
       });
     }
 
-    // Just save status update (Pending → Shipped)
-    await order.save({ session });
+    /* =====================
+       NORMAL STATUS UPDATE
+    ===================== */
+
+    // 🔔 STATUS UPDATE (HOOK WILL FIRE)
+    await Order.findByIdAndUpdate(
+      order._id,
+      { $set: update },
+      { new: true, session }
+    );
 
     await session.commitTransaction();
     session.endSession();
 
     return res.status(200).json({
       success: true,
-      message: 'Order status updated successfully',
+      message: "Order status updated successfully",
     });
 
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
 
-    console.error('❌ updateOrderStatus error:', error);
+    console.error("❌ updateOrderStatus error:", error);
 
     return res.status(500).json({
       success: false,
-      message: 'Failed to update order',
+      message: "Failed to update order",
     });
   }
 };
+
 // ----------------------------
 // Get all order history
 // ----------------------------
