@@ -1,7 +1,7 @@
-const mongoose = require('mongoose');
-const Order = require('../models/order.model');
-const OrderHistory = require('../models/orderhistory.model');
-const Coupon = require('../models/coupon.model');
+const mongoose = require("mongoose");
+const Order = require("../models/order.model");
+const OrderHistory = require("../models/orderhistory.model");
+const Coupon = require("../models/coupon.model");
 
 // ----------------------------
 // Helper: Clean order object
@@ -23,8 +23,9 @@ const cleanOrder = async (order) => {
 
   delete obj.couponId;
 
-  obj.customerName = obj.shippingAddress?.name || '';
-  obj.customerPhone = obj.shippingAddress?.phone || '';
+  // ✅ NO CHANGE: shipping data (delivery info)
+  obj.customerName = obj.shippingAddress?.name || "";
+  obj.customerPhone = obj.shippingAddress?.phone || "";
 
   return obj;
 };
@@ -35,22 +36,25 @@ const cleanOrder = async (order) => {
 exports.getPendingOrders = async (req, res) => {
   try {
     const orders = await Order.find({
-      orderStatus: { $nin: ['Delivered', 'Cancelled'] }
-    }).populate('userId', 'name phone').sort({ createdAt: -1 });
+      orderStatus: { $nin: ["Delivered", "Cancelled"] },
+    })
+      // 🔁 CHANGE HERE: phone → email (User model)
+      .populate("userId", "name email")
+      .sort({ createdAt: -1 });
 
     const cleanedOrders = await Promise.all(orders.map(cleanOrder));
 
     // Enrich with user data
     const enrichedOrders = cleanedOrders.map((order, idx) => ({
       ...order,
-      user: orders[idx].userId
+      user: orders[idx].userId, // now contains name + email
     }));
 
     res.status(200).json({ success: true, orders: enrichedOrders });
   } catch (error) {
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch pending orders',
+      message: "Failed to fetch pending orders",
     });
   }
 };
@@ -90,9 +94,7 @@ exports.updateOrderStatus = async (req, res) => {
     /* =====================
        PREPARE UPDATE
     ===================== */
-    const update = {
-      orderStatus,
-    };
+    const update = { orderStatus };
 
     // COD auto-paid when delivered
     if (order.paymentMethod === "COD" && orderStatus === "Delivered") {
@@ -163,7 +165,6 @@ exports.updateOrderStatus = async (req, res) => {
       success: true,
       message: "Order status updated successfully",
     });
-
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
@@ -183,14 +184,22 @@ exports.updateOrderStatus = async (req, res) => {
 exports.getOrderHistory = async (req, res) => {
   try {
     const history = await OrderHistory.find()
-      .populate('userId', 'name phone')
+      // 🔁 CHANGE HERE: phone → email
+      .populate("userId", "name email")
       .sort({ completedAt: -1 });
 
-    // Enrich with customerName/Phone and user data
-    const enrichedHistory = history.map(h => {
+    const enrichedHistory = history.map((h) => {
       const obj = h.toObject ? h.toObject() : h;
-      obj.customerName = obj.userId?.name || obj.shippingAddress?.name || '';
-      obj.customerPhone = obj.userId?.phone || obj.shippingAddress?.phone || '';
+
+      obj.customerName =
+        obj.userId?.name || obj.shippingAddress?.name || "";
+
+      // 🔁 CHANGE HERE: user.phone → user.email
+      obj.customerEmail = obj.userId?.email || "";
+
+      // ✅ NO CHANGE: delivery phone
+      obj.customerPhone = obj.shippingAddress?.phone || "";
+
       obj.user = obj.userId;
       return obj;
     });
@@ -199,7 +208,7 @@ exports.getOrderHistory = async (req, res) => {
   } catch (error) {
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch order history',
+      message: "Failed to fetch order history",
     });
   }
 };
@@ -209,20 +218,26 @@ exports.getOrderHistory = async (req, res) => {
 // ----------------------------
 exports.getOrderById = async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id).populate('userId', 'name phone');
+    const order = await Order.findById(req.params.id)
+      // 🔁 CHANGE HERE: phone → email
+      .populate("userId", "name email");
+
     if (!order)
-      return res.status(404).json({ success: false, message: 'Order not found' });
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
 
     const cleanedOrder = await cleanOrder(order);
-    res.status(200).json({ 
-      success: true, 
+
+    res.status(200).json({
+      success: true,
       order: cleanedOrder,
-      user: order.userId
+      user: order.userId, // contains name + email
     });
   } catch (error) {
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch order',
+      message: "Failed to fetch order",
     });
   }
 };
@@ -232,23 +247,36 @@ exports.getOrderById = async (req, res) => {
 // ----------------------------
 exports.getOrderHistoryById = async (req, res) => {
   try {
-    const history = await OrderHistory.findById(req.params.id).populate('userId', 'name phone');
+    const history = await OrderHistory.findById(req.params.id)
+      // 🔁 CHANGE HERE: phone → email
+      .populate("userId", "name email");
+
     if (!history)
-      return res.status(404).json({ success: false, message: 'Order history not found' });
+      return res.status(404).json({
+        success: false,
+        message: "Order history not found",
+      });
 
     const obj = history.toObject ? history.toObject() : history;
-    obj.customerName = obj.userId?.name || obj.shippingAddress?.name || '';
-    obj.customerPhone = obj.userId?.phone || obj.shippingAddress?.phone || '';
 
-    res.status(200).json({ 
-      success: true, 
+    obj.customerName =
+      obj.userId?.name || obj.shippingAddress?.name || "";
+
+    // 🔁 CHANGE HERE
+    obj.customerEmail = obj.userId?.email || "";
+
+    // ✅ NO CHANGE
+    obj.customerPhone = obj.shippingAddress?.phone || "";
+
+    res.status(200).json({
+      success: true,
       history: obj,
-      user: obj.userId
+      user: obj.userId,
     });
   } catch (error) {
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch order history',
+      message: "Failed to fetch order history",
     });
   }
 };

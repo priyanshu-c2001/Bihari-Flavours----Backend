@@ -25,10 +25,11 @@
     "multer": "^2.0.2",
     "multer-storage-cloudinary": "^4.0.0",
     "node-cron": "^4.2.1",
+    "nodemailer": "^7.0.12",
     "razorpay": "^2.9.6",
     "twilio": "^5.10.2"
   },
   "devDependencies": {
-    "nodemon": "^3.0.0"
+    "nodemon": "^3.1.11"
   }
 }

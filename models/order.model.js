@@ -1,5 +1,5 @@
 const mongoose = require("mongoose");
-const { sendOrderStatusSMS } = require("../utils/fast2sms.util");
+const { sendOrderStatusEmail } = require("../utils/mail.service");
 const User = require("./user.model");
 
 /* ---------------- SUB SCHEMA ---------------- */
@@ -28,7 +28,7 @@ const orderSchema = new mongoose.Schema(
 
     shippingAddress: {
       name: { type: String, required: true },
-      phone: { type: String, required: true },
+      phone: { type: String }, // optional now (email-based system)
       street: String,
       city: { type: String, required: true },
       state: { type: String, required: true },
@@ -62,7 +62,7 @@ const orderSchema = new mongoose.Schema(
 );
 
 /* =====================
-   🚨 HOOKS START HERE
+   🚨 HOOKS
 ===================== */
 
 // 🆕 NEW ORDER CREATED
@@ -72,22 +72,22 @@ orderSchema.pre("save", function (next) {
 });
 
 orderSchema.post("save", async function (doc) {
-  if (!this._wasNew) return; // ✅ only new order
+  if (!this._wasNew) return;
 
   try {
     const user = await User.findById(doc.userId);
-    if (!user) return;
+    if (!user || !user.email) return;
 
-    console.log("🆕 Order placed");
+    console.log("🆕 Order placed → Email");
 
-    await sendOrderStatusSMS({
-      phone: user.phone,
+    await sendOrderStatusEmail({
+      email: user.email,
       orderId: doc._id,
       amount: doc.totalAmount,
       status: "Placed",
     });
   } catch (err) {
-    console.error("Order create SMS error:", err);
+    console.error("Order create email error:", err);
   }
 });
 
@@ -116,21 +116,24 @@ orderSchema.post("findOneAndUpdate", async function () {
     if (!this._orderBeforeUpdate || !this._newStatus) return;
 
     const user = await User.findById(this._orderBeforeUpdate.userId);
-    if (!user) return;
-    console.log("Sending order status SMS to:", user.phone);
+    if (!user || !user.email) return;
 
-    await sendOrderStatusSMS({
-      phone: user.phone,
+    console.log("📧 Sending order status email to:", user.email);
+
+    await sendOrderStatusEmail({
+      email: user.email,
       orderId: this._orderBeforeUpdate._id,
       amount: this._orderBeforeUpdate.totalAmount,
       status: this._newStatus,
     });
   } catch (err) {
-    console.error("Order status SMS error:", err);
+    console.error("Order status email error:", err);
   }
 });
 
 /* =====================
    EXPORT MODEL
 ===================== */
-module.exports = mongoose.model("Order", orderSchema);
+const Order = mongoose.model("Order", orderSchema);
+module.exports = Order;
+module.exports.orderItemSchema = orderItemSchema;

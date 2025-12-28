@@ -1,7 +1,6 @@
 const User = require("../models/user.model");
 const Otp = require("../models/otp.model");
 const { generateToken } = require("../utils/jwt");
-const { getPhoneVariants } = require("../utils/fast2sms.util");
 
 const isProduction = process.env.USE_HTTPS === "true";
 
@@ -15,25 +14,24 @@ const cookieOptions = {
 };
 
 /* =====================
-   SIGNUP
+   SIGNUP (EMAIL + OTP)
 ===================== */
 exports.signup = async (req, res) => {
   try {
-    let { name, phone, password } = req.body;
+    let { name, email, password } = req.body;
 
-    if (!name || !phone || !password) {
+    if (!name || !email || !password) {
       return res.status(400).json({
         success: false,
         message: "All fields are required",
       });
     }
 
-    // Normalize phone → +91 format
-    const { e164 } = getPhoneVariants(phone);
+    email = email.toLowerCase().trim();
 
     // OTP must be verified for signup
     const otpEntry = await Otp.findOne({
-      phone: e164,
+      email,
       purpose: "signup",
       status: "verified",
     });
@@ -46,7 +44,7 @@ exports.signup = async (req, res) => {
     }
 
     // Prevent duplicate user
-    const existingUser = await User.findOne({ phone: e164 });
+    const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(400).json({
         success: false,
@@ -57,18 +55,16 @@ exports.signup = async (req, res) => {
     // Create user
     const newUser = await User.create({
       name,
-      phone: e164,
+      email,
       password,
       role: "user",
     });
 
-    // Cleanup OTP after successful signup
+    // Cleanup OTP
     await Otp.deleteOne({ _id: otpEntry._id });
 
-    // Generate JWT
     const token = generateToken(newUser);
 
-    // Set cookie
     res.cookie("token", token, cookieOptions);
 
     const responseData = {
@@ -76,17 +72,14 @@ exports.signup = async (req, res) => {
       message: "User created successfully",
       user: {
         name: newUser.name,
-        phone: newUser.phone,
+        email: newUser.email,
         role: newUser.role,
       },
     };
 
-    if (!isProduction) {
-      responseData.token = token;
-    }
+    if (!isProduction) responseData.token = token;
 
     return res.status(201).json(responseData);
-
   } catch (error) {
     console.error("Signup error:", error);
     return res.status(500).json({
@@ -97,27 +90,26 @@ exports.signup = async (req, res) => {
 };
 
 /* =====================
-   SIGNIN (PASSWORD)
+   SIGNIN (EMAIL + PASSWORD)
 ===================== */
 exports.signin = async (req, res) => {
   try {
-    let { phone, password } = req.body;
+    let { email, password } = req.body;
 
-    if (!phone || !password) {
+    if (!email || !password) {
       return res.status(400).json({
         success: false,
-        message: "Phone and password are required",
+        message: "Email and password are required",
       });
     }
 
-    // Normalize phone → +91 format
-    const { e164 } = getPhoneVariants(phone);
+    email = email.toLowerCase().trim();
 
-    const user = await User.findOne({ phone: e164 });
+    const user = await User.findOne({ email });
     if (!user) {
       return res.status(400).json({
         success: false,
-        message: "Invalid phone or password",
+        message: "Invalid email or password",
       });
     }
 
@@ -125,13 +117,12 @@ exports.signin = async (req, res) => {
     if (!isMatch) {
       return res.status(400).json({
         success: false,
-        message: "Invalid phone or password",
+        message: "Invalid email or password",
       });
     }
 
     const token = generateToken(user);
 
-    // Set cookie
     res.cookie("token", token, cookieOptions);
 
     const responseData = {
@@ -139,17 +130,14 @@ exports.signin = async (req, res) => {
       message: "Login successful",
       user: {
         name: user.name,
-        phone: user.phone,
+        email: user.email,
         role: user.role,
       },
     };
 
-    if (!isProduction) {
-      responseData.token = token;
-    }
+    if (!isProduction) responseData.token = token;
 
     return res.status(200).json(responseData);
-
   } catch (error) {
     console.error("Signin error:", error);
     return res.status(500).json({
@@ -159,22 +147,17 @@ exports.signin = async (req, res) => {
   }
 };
 
-
-// =====================
-// LOGOUT
-// =====================
+/* =====================
+   LOGOUT
+===================== */
 exports.logout = async (req, res) => {
   try {
     res.clearCookie("token", cookieOptions);
-
-    
-    res.clearCookie("token");
 
     return res.status(200).json({
       success: true,
       message: "Logged out successfully",
     });
-
   } catch (error) {
     console.error("Logout error:", error);
     return res.status(500).json({
