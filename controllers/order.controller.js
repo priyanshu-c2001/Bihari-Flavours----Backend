@@ -104,7 +104,7 @@ exports.createOrder = async (req, res) => {
        COD FLOW (WORKING ALREADY)
     ====================================================== */
     if (paymentMethod === 'COD') {
-      totalAmount += 20;
+      totalAmount += 30;
 
       const [order] = await Order.create([{
         userId,
